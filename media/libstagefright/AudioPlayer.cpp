@@ -32,10 +32,6 @@
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
 
-#ifdef QCOM_HARDWARE
-#include <media/stagefright/ExtendedCodec.h>
-#endif
-
 #include "include/AwesomePlayer.h"
 
 namespace android {
@@ -65,11 +61,7 @@ AudioPlayer::AudioPlayer(
       mPinnedTimeUs(-1ll),
       mPlaying(false),
       mStartPosUs(0),
-      mCreateFlags(flags)
-#ifdef QCOM_HARDWARE
-      ,mPauseRequired(false)
-#endif
-      {
+      mCreateFlags(flags) {
 }
 
 AudioPlayer::~AudioPlayer() {
@@ -258,13 +250,7 @@ status_t AudioPlayer::start(bool sourceAlreadyStarted) {
     mStarted = true;
     mPlaying = true;
     mPinnedTimeUs = -1ll;
-#ifdef QCOM_HARDWARE
-    const char *componentName;
-    if (!(format->findCString(kKeyDecoderComponent, &componentName))) {
-          componentName = "none";
-    }
-    mPauseRequired = ExtendedCodec::isSourcePauseRequired(componentName);
-#endif
+
     return OK;
 }
 
@@ -291,10 +277,8 @@ void AudioPlayer::pause(bool playPendingSamples) {
 
     mPlaying = false;
     CHECK(mSource != NULL);
-    if (mPauseRequired) {
-        if (mSource->pause() == OK) {
-            mSourcePaused = true;
-        }
+    if (mSource->pause() == OK) {
+        mSourcePaused = true;
     }
 }
 
@@ -396,9 +380,6 @@ void AudioPlayer::reset() {
     mStarted = false;
     mPlaying = false;
     mStartPosUs = 0;
-#ifdef QCOM_HARDWARE
-    mPauseRequired = false;
-#endif
 }
 
 // static
