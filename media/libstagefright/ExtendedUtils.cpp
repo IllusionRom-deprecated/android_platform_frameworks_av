@@ -1,4 +1,4 @@
-/*Copyright (c) 2013, The Linux Foundation. All rights reserved.
+/*Copyright (c) 2013-2014, The Linux Foundation. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are
@@ -54,6 +54,10 @@ static const int64_t kMaxAVSyncLateMargin     = 250000;
 
 #include "include/ExtendedExtractor.h"
 #include "include/avc_utils.h"
+#include <fcntl.h>
+#include <linux/msm_ion.h>
+#define MEM_DEVICE "/dev/ion"
+#define MEM_HEAP_ID ION_CP_MM_HEAP_ID
 
 namespace android {
 
@@ -156,11 +160,13 @@ void ExtendedUtils::HFR::copyHFRParams(
     outputFormat->setInt32(kKeyFrameRate, frameRate);
 }
 
-bool ExtendedUtils::ShellProp::isAudioDisabled() {
+bool ExtendedUtils::ShellProp::isAudioDisabled(bool isEncoder) {
     bool retVal = false;
     char disableAudio[PROPERTY_VALUE_MAX];
     property_get("persist.debug.sf.noaudio", disableAudio, "0");
-    if (atoi(disableAudio) == 1) {
+    if (isEncoder && (atoi(disableAudio) & 0x02)) {
+        retVal = true;
+    } else if (atoi(disableAudio) & 0x01) {
         retVal = true;
     }
     return retVal;
@@ -463,8 +469,19 @@ void ExtendedUtils::helper_addMediaCodec(Vector<MediaCodecList::CodecInfo> &mCod
     MediaCodecList::CodecInfo *info = &mCodecInfos.editItemAt(mCodecInfos.size() - 1);
     info->mName = name;
     info->mIsEncoder = encoder;
+    info->mTypes=0;
     ssize_t index = mTypes.indexOfKey(type);
-    uint32_t bit = mTypes.valueAt(index);
+    uint32_t bit;
+    if(index < 0) {
+         bit = mTypes.size();
+         if (bit == 32) {
+             ALOGW("Too many distinct type names in configuration.");
+             return;
+         }
+         mTypes.add(name, bit);
+    } else {
+        bit = mTypes.valueAt(index);
+    }
     info->mTypes |= 1ul << bit;
     info->mQuirks = quirks;
 }
@@ -514,36 +531,89 @@ bool ExtendedUtils::checkIsThumbNailMode(const uint32_t flags, char* componentNa
     return isInThumbnailMode;
 }
 
-void ExtendedUtils::setArbitraryModeIfInterlaced(
-        const uint8_t *ptr, const sp<MetaData> &meta) {
-
-    if (ptr == NULL) {
-        return;
+void ExtendedUtils::prefetchSecurePool(const char *uri)
+{
+    if (!strncasecmp("widevine://", uri, 11)) {
+        ALOGV("Widevine streaming content\n");
+        createSecurePool();
     }
-    uint16_t spsSize = (((uint16_t)ptr[6]) << 8) + (uint16_t)(ptr[7]);
-    int32_t width = 0, height = 0, isInterlaced = 0;
-    const uint8_t *spsStart = &ptr[8];
-
-    sp<ABuffer> seqParamSet = new ABuffer(spsSize);
-    memcpy(seqParamSet->data(), spsStart, spsSize);
-    FindAVCDimensions(seqParamSet, &width, &height, NULL, NULL, &isInterlaced);
-
-    ALOGV("height is %d, width is %d, isInterlaced is %d\n", height, width, isInterlaced);
-    if (isInterlaced) {
-        meta->setInt32(kKeyUseArbitraryMode, 1);
-        meta->setInt32(kKeyInterlace, 1);
-    }
-    return;
 }
 
-int32_t ExtendedUtils::checkIsInterlace(sp<MetaData> &meta) {
-    int32_t isInterlaceFormat = 0;
+void ExtendedUtils::prefetchSecurePool(int fd)
+{
+    char symName[40] = {0};
+    char fileName[256] = {0};
+    char* kSuffix;
+    size_t kSuffixLength = 0;
+    size_t fileNameLength;
 
-    if(meta->findInt32(kKeyInterlace, &isInterlaceFormat)) {
-        ALOGI("interlace format detected");
+    snprintf(symName, sizeof(symName), "/proc/%d/fd/%d", getpid(), fd);
+
+    if (readlink( symName, fileName, (sizeof(fileName) - 1)) != -1 ) {
+        kSuffix = (char *)".wvm";
+        kSuffixLength = strlen(kSuffix);
+        fileNameLength = strlen(fileName);
+
+        if (!strcmp(&fileName[fileNameLength - kSuffixLength], kSuffix)) {
+            ALOGV("Widevine local content\n");
+            createSecurePool();
+        }
     }
+}
 
-    return isInterlaceFormat;
+void ExtendedUtils::prefetchSecurePool()
+{
+    createSecurePool();
+}
+
+void ExtendedUtils::createSecurePool()
+{
+#ifdef ION_IOC_PREFETCH
+    struct ion_prefetch_data prefetch_data;
+    struct ion_custom_data d;
+    int ion_dev_flag = O_RDONLY;
+    int rc = 0;
+    int fd = open (MEM_DEVICE, ion_dev_flag);
+
+    if (fd < 0) {
+        ALOGE("opening ion device failed with fd = %d", fd);
+    } else {
+        prefetch_data.heap_id = ION_HEAP(MEM_HEAP_ID);
+        prefetch_data.len = 0x0;
+        d.cmd = ION_IOC_PREFETCH;
+        d.arg = (unsigned long int)&prefetch_data;
+        rc = ioctl(fd, ION_IOC_CUSTOM, &d);
+        if (rc != 0) {
+            ALOGE("creating secure pool failed, rc is %d, errno is %d", rc, errno);
+        }
+        close(fd);
+    }
+#endif
+}
+
+void ExtendedUtils::drainSecurePool()
+{
+#ifdef ION_IOC_DRAIN
+    struct ion_prefetch_data prefetch_data;
+    struct ion_custom_data d;
+    int ion_dev_flag = O_RDONLY;
+    int rc = 0;
+    int fd = open (MEM_DEVICE, ion_dev_flag);
+
+    if (fd < 0) {
+        ALOGE("opening ion device failed with fd = %d", fd);
+    } else {
+        prefetch_data.heap_id = ION_HEAP(MEM_HEAP_ID);
+        prefetch_data.len = 0x0;
+        d.cmd = ION_IOC_DRAIN;
+        d.arg = (unsigned long int)&prefetch_data;
+        rc = ioctl(fd, ION_IOC_CUSTOM, &d);
+        if (rc != 0) {
+            ALOGE("draining secure pool failed rc is %d, errno is %d", rc, errno);
+        }
+        close(fd);
+    }
+#endif
 }
 
 }
@@ -576,7 +646,7 @@ void ExtendedUtils::HFR::copyHFRParams(
         sp<MetaData> &outputFormat) {
 }
 
-bool ExtendedUtils::ShellProp::isAudioDisabled() {
+bool ExtendedUtils::ShellProp::isAudioDisabled(bool isEncoder) {
     return false;
 }
 
@@ -611,7 +681,7 @@ bool ExtendedUtils::UseQCHWAACEncoder(audio_encoder Encoder,int32_t Channel,
 sp<MediaExtractor> ExtendedUtils::MediaExtractor_CreateIfNeeded(sp<MediaExtractor> defaultExt,
                                                             const sp<DataSource> &source,
                                                             const char *mime) {
-                   return defaultExt;
+    return defaultExt;
 }
 
 void ExtendedUtils::helper_addMediaCodec(Vector<MediaCodecList::CodecInfo> &mCodecInfos,
@@ -637,13 +707,15 @@ bool ExtendedUtils::checkIsThumbNailMode(const uint32_t flags, char* componentNa
     return false;
 }
 
-void ExtendedUtils::setArbitraryModeIfInterlaced(
-        const uint8_t *ptr, const sp<MetaData> &meta) {
-}
+void ExtendedUtils::prefetchSecurePool(int fd) {}
 
-int32_t ExtendedUtils::checkIsInterlace(sp<MetaData> &meta) {
-    return false;
-}
+void ExtendedUtils::prefetchSecurePool(const char *uri) {}
+
+void ExtendedUtils::prefetchSecurePool() {}
+
+void ExtendedUtils::createSecurePool() {}
+
+void ExtendedUtils::drainSecurePool() {}
 
 }
 #endif //ENABLE_AV_ENHANCEMENTS

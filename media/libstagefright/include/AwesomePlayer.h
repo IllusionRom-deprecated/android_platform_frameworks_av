@@ -107,6 +107,9 @@ struct AwesomePlayer {
     void printFileName(int fd);
     status_t dump(int fd, const Vector<String16> &args) const;
 
+    status_t suspend();
+    status_t resume();
+
 private:
     friend struct AwesomeEvent;
     friend struct PreviewPlayer;
@@ -211,6 +214,8 @@ private:
     static int mTunnelAliveAP;
 #endif
 
+    bool mIsFirstFrameAfterResume;
+
     sp<TimedEventQueue::Event> mVideoEvent;
     bool mVideoEventPending;
     sp<TimedEventQueue::Event> mStreamDoneEvent;
@@ -237,6 +242,7 @@ private:
     void postAudioTearDownEvent(int64_t delayUs);
 
     status_t play_l();
+    status_t fallbackToSWDecoder();
 
     MediaBuffer *mVideoBuffer;
 
@@ -329,6 +335,7 @@ private:
     void printStats();
     int64_t getTimeOfDayUs();
     bool mStatistics;
+    int64_t mLateAVSyncMargin;
 
     struct TrackStat {
         String8 mMIME;
@@ -397,6 +404,7 @@ private:
 #endif
     AwesomePlayer(const AwesomePlayer &);
     AwesomePlayer &operator=(const AwesomePlayer &);
+    bool mReadRetry;
 };
 
 }  // namespace android
